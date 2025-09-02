@@ -1,2 +1,0 @@
-# col-334
-COMPUTER NETWORKS
