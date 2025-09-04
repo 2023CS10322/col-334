@@ -1,135 +1,159 @@
 #!/usr/bin/env python3
 
-import json
 import os
+import re
 import time
 import glob
+import csv
 import numpy as np
+from pathlib import Path
+from topology import create_network
+
+RESULTS_CSV = Path("results_p3.csv")
 
 class Runner:
-    def __init__(self, config_file='config.json'):
-        with open(config_file, 'r') as f:
-            self.config = json.load(f)
-        
-        self.server_ip = self.config['server_ip']
-        self.port = self.config['port']
-        self.num_clients = self.config['num_clients']
-        self.c = self.config['c']  # Batch size for rogue client
-        self.p = self.config['p']  # Offset (always 0) since we want to download the full file
-        self.k = self.config['k']  # Words per request (always 5)
-        
-        print(f"Config: {self.num_clients} clients, c={self.c}, p={self.p}, k={self.k}")
-    
+    def __init__(self, config_file='config.json', runs_per_c=5):
+        # --- Simple config parser (avoid json library) ---
+        config = {}
+        with open(config_file) as f:
+            for line in f:
+                line = line.strip().strip(",")
+                if not line or line[0] in "{}":
+                    continue
+                key, val = line.split(":", 1)
+                key = key.strip().strip('"')
+                val = val.strip().strip('"')
+                config[key] = val
+
+        self.server_ip = config['server_ip']
+        self.port = int(config['port'])
+        self.num_clients = int(config['num_clients'])
+        self.c_max = int(config['c'])       # max c to test
+        self.p = int(config['p'])
+        self.k = int(config['k'])
+        self.runs_per_c = runs_per_c
+
+        print(f"Config: {self.num_clients} clients, max c={self.c_max}, p={self.p}, k={self.k}")
+
     def cleanup_logs(self):
-        """Clean old log files"""
         logs = glob.glob("logs/*.log")
         for log in logs:
             os.remove(log)
-        print("Cleaned old logs")
-    
+        os.makedirs("logs", exist_ok=True)
+
     def parse_logs(self):
-        """
-        TODO:
-        Parse log files and return completion times
-        Return: {'rogue': [times], 'normal': [times]}
-        """
-        print("TODO: Implement parse_logs() function")
-        return {'rogue': [], 'normal': []}
-    
+        """Return dict: {'rogue':[ms], 'normal':[ms,...]}"""
+        results = {'rogue': [], 'normal': []}
+
+        # Rogue log
+        rogue_path = "logs/rogue.log"
+        if os.path.exists(rogue_path):
+            txt = open(rogue_path).read()
+            m = re.search(r"ELAPSED_MS\s*:\s*(\d+)", txt)
+            if m:
+                results['rogue'].append(int(m.group(1)))
+
+        # Normal clients
+        for i in range(2, self.num_clients + 1):
+            path = f"logs/normal_{i}.log"
+            if os.path.exists(path):
+                txt = open(path).read()
+                m = re.search(r"ELAPSED_MS\s*:\s*(\d+)", txt)
+                if m:
+                    results['normal'].append(int(m.group(1)))
+
+        return results
+
+    # def calculate_jfi(self, completion_times):
+    #     """JFI = (Σu)^2 / (n Σu^2), where u_i = 1/t_i"""
+    #     all_times = completion_times['rogue'] + completion_times['normal']
+    #     if len(all_times) != self.num_clients:
+    #         print(f"[WARN] Expected {self.num_clients} times, got {len(all_times)}")
+    #         return 0.0
+    #     arr = np.array(all_times, dtype=float)
+    #     arr[arr <= 0] = 1e-6
+    #     utils = 1.0 / arr
+    #     s = utils.sum()
+    #     s2 = (utils ** 2).sum()
+    #     n = len(utils)
+    #     return (s * s) / (n * s2)
     def calculate_jfi(self, completion_times):
-        """
-        TODO:
-        Calculate Jain's Fairness Index
-        Note: JFI runs under the - more is better policy; 
-        i.e., JFI's variable must represent a positive benefit measure (e.g., throughput, share of CPU, utility).
-        
-        Formula: JFI = (sum of utilities)^2 / (n * sum of utilities^2)
-        
-        """
-        pass
-    
-    def run_experiment(self, c_value):
-        """Run single experiment with given c value"""
-        print(f"Running experiment with c={c_value}")
-        
-        # Clean logs
+        all_times = completion_times['rogue'] + completion_times['normal']
+        arr = np.array(all_times, dtype=float)
+        # JFI on times (no inversion)
+        s = arr.sum()
+        s2 = (arr ** 2).sum()
+        n = len(arr)
+        return (s * s) / (n * s2)
+
+
+    def run_experiment(self, c_value, run_id=1):
+        print(f"Running c={c_value}, run={run_id}")
         self.cleanup_logs()
-        
-        # Create network
-        from topology import create_network
         net = create_network(num_clients=self.num_clients)
-        
+
         try:
-            # Get hosts
             server = net.get('server')
             clients = [net.get(f'client{i+1}') for i in range(self.num_clients)]
-            
-            # Start server (students create server.py)
-            print("Starting server...")
+
+            # Start server
             server_proc = server.popen("python3 server.py")
-            time.sleep(3)
-            
-            # Start clients
-            print("Starting clients...")
-            # Client 1 is rogue (batch size c)
-            rogue_proc = clients[0].popen(f"python3 client.py --batch-size {c_value} --client-id rogue")
-            
-            # Clients 2-N are normal (batch size 1)
+            time.sleep(2)
+
+            # Start rogue client
+            rogue_proc = clients[0].popen(
+                f"python3 client.py --batch-size {c_value} --client-id rogue > logs/rogue.log 2>&1",
+                shell=True
+            )
+
+            # Start normal clients
             normal_procs = []
             for i in range(1, self.num_clients):
-                proc = clients[i].popen(f"python3 client.py --batch-size 1 --client-id normal_{i+1}")
+                proc = clients[i].popen(
+                    f"python3 client.py --batch-size 1 --client-id normal_{i+1} > logs/normal_{i+1}.log 2>&1",
+                    shell=True
+                )
                 normal_procs.append(proc)
-            
-            # Wait for all clients
+
+            # Wait for clients
             rogue_proc.wait()
             for proc in normal_procs:
                 proc.wait()
-            
+
             # Stop server
             server_proc.terminate()
             server_proc.wait()
-            time.sleep(2)
-            
-            # Parse results
             time.sleep(1)
+
+            # Parse logs & compute JFI
             results = self.parse_logs()
-            
-            return results
-            
+            jfi = self.calculate_jfi(results)
+
+            # Write CSV
+            with RESULTS_CSV.open("a", newline="") as f:
+                csv.writer(f).writerow([c_value, run_id, jfi])
+
+            print(f"c={c_value}, run={run_id}, JFI={jfi:.3f}")
+            return jfi
+
         finally:
             net.stop()
-    
-    def run_varying_c(self):
-        """Run experiments with c starting from config value, incrementing by 2 until <= 20"""
-        c_values = list(range(self.c, 21, 2)) 
-        
-        print("Running experiments with varying c values...")
-        
-        for c in c_values:
-            print(f"\n--- Testing c = {c} ---")
-            results = self.run_experiment(c)
-            
-            # TODO: Students implement result saving/logging
-            # TODO: Students implement metrics calculation and JFI
-            print(f"Experiment with c={c} completed")
-        
-        print("All experiments completed")
-        # TODO: Students implement result analysis and plotting
 
-    def plot_jfi_vs_c(self, results):
-        """
-        TODO: 
-        Plot JFI values vs c values
-        """
-        pass
+    def run_varying_c(self):
+        if not RESULTS_CSV.exists():
+            with RESULTS_CSV.open("w", newline="") as f:
+                csv.writer(f).writerow(["c", "run", "jfi"])
+
+        for c in range(1, self.c_max + 1,4):
+            for r in range(1, self.runs_per_c + 1):
+                self.run_experiment(c, run_id=r)
+
+        print("All experiments completed.")
+
 
 def main():
-    runner = Runner()
-    
-    # Run experiments with varying c values
+    runner = Runner(runs_per_c=5)   # run each c 5 times
     runner.run_varying_c()
-    
-    # TODO: Students implement result saving and analysis
 
 if __name__ == '__main__':
     main()
