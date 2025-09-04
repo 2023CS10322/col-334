@@ -12,7 +12,7 @@ from topology import create_network
 RESULTS_CSV = Path("results_p3.csv")
 
 class Runner:
-    def __init__(self, config_file='config.json', runs_per_c=5):
+    def __init__(self, config_file='config.json', runs_per_c=1):
         # --- Simple config parser (avoid json library) ---
         config = {}
         with open(config_file) as f:
@@ -41,50 +41,60 @@ class Runner:
             os.remove(log)
         os.makedirs("logs", exist_ok=True)
 
-    def parse_logs(self):
-        """Return dict: {'rogue':[ms], 'normal':[ms,...]}"""
+    def parse_logs(self, exp_start):
+        """Return dict: {'rogue':[ms], 'normal':[ms,...]} using a common start."""
         results = {'rogue': [], 'normal': []}
 
-        # Rogue log
-        rogue_path = "logs/rogue.log"
-        if os.path.exists(rogue_path):
-            txt = open(rogue_path).read()
-            m = re.search(r"ELAPSED_MS\s*:\s*(\d+)", txt)
-            if m:
-                results['rogue'].append(int(m.group(1)))
+        import re, os
+
+        def finish_ms(path):
+            if os.path.exists(path):
+                txt = open(path).read()
+                # requires client.py to print: FINISH_EPOCH:<float>
+                m = re.search(r"FINISH_EPOCH\s*:\s*([0-9]+(?:\.[0-9]+)?)", txt)
+                if m:
+                    finish_epoch = float(m.group(1))
+                    return int(1000 * (finish_epoch - exp_start))
+            return None
+
+        # Rogue
+        ms = finish_ms("logs/rogue.log")
+        if ms is not None:
+            results['rogue'].append(ms)
 
         # Normal clients
         for i in range(2, self.num_clients + 1):
-            path = f"logs/normal_{i}.log"
-            if os.path.exists(path):
-                txt = open(path).read()
-                m = re.search(r"ELAPSED_MS\s*:\s*(\d+)", txt)
-                if m:
-                    results['normal'].append(int(m.group(1)))
+            ms = finish_ms(f"logs/normal_{i}.log")
+            if ms is not None:
+                results['normal'].append(ms)
 
         return results
 
+
+
+
     # def calculate_jfi(self, completion_times):
-    #     """JFI = (Σu)^2 / (n Σu^2), where u_i = 1/t_i"""
     #     all_times = completion_times['rogue'] + completion_times['normal']
-    #     if len(all_times) != self.num_clients:
-    #         print(f"[WARN] Expected {self.num_clients} times, got {len(all_times)}")
-    #         return 0.0
     #     arr = np.array(all_times, dtype=float)
     #     arr[arr <= 0] = 1e-6
-    #     utils = 1.0 / arr
-    #     s = utils.sum()
-    #     s2 = (utils ** 2).sum()
-    #     n = len(utils)
-    #     return (s * s) / (n * s2)
+    #     s, s2, n = arr.sum(), (arr**2).sum(), len(arr)
+    #     return (s*s) / (n*s2)
     def calculate_jfi(self, completion_times):
+        """JFI on utilities u_i = 1 / t_i (higher is better)."""
         all_times = completion_times['rogue'] + completion_times['normal']
+        if len(all_times) != self.num_clients:
+            print(f"[WARN] Expected {self.num_clients} times, got {len(all_times)}")
+            return 0.0
+
         arr = np.array(all_times, dtype=float)
-        # JFI on times (no inversion)
-        s = arr.sum()
-        s2 = (arr ** 2).sum()
-        n = len(arr)
+        arr[arr <= 0] = 1e-6
+        u = 1.0 / arr  # utilities
+        s = u.sum()
+        s2 = (u ** 2).sum()
+        n = len(u)
         return (s * s) / (n * s2)
+
+
 
 
     def run_experiment(self, c_value, run_id=1):
@@ -98,7 +108,8 @@ class Runner:
 
             # Start server
             server_proc = server.popen("python3 server.py")
-            time.sleep(2)
+            time.sleep(2)                         # warm up server
+            exp_start = time.time() 
 
             # Start rogue client
             rogue_proc = clients[0].popen(
@@ -126,7 +137,7 @@ class Runner:
             time.sleep(1)
 
             # Parse logs & compute JFI
-            results = self.parse_logs()
+            results = self.parse_logs(exp_start)   # <<< changed
             jfi = self.calculate_jfi(results)
 
             # Write CSV
@@ -144,7 +155,7 @@ class Runner:
             with RESULTS_CSV.open("w", newline="") as f:
                 csv.writer(f).writerow(["c", "run", "jfi"])
 
-        for c in range(1, self.c_max + 1,4):
+        for c in range(1, self.c_max + 1):
             for r in range(1, self.runs_per_c + 1):
                 self.run_experiment(c, run_id=r)
 
@@ -152,7 +163,7 @@ class Runner:
 
 
 def main():
-    runner = Runner(runs_per_c=5)   # run each c 5 times
+    runner = Runner(runs_per_c=1)   # run each c 5 times
     runner.run_varying_c()
 
 if __name__ == '__main__':

@@ -1,8 +1,10 @@
 {
-    "server_ip": "10.0.0.100",
-    "port": 8887,
-    "num_clients": 10,
-    "c": 50,
-    "p": 0,
-    "k": 5
+  "server_ip": "10.0.0.100",
+  "port": 8887,
+  "num_clients": 10,
+  "c": 20,
+  "p": 0,
+  "k": 5,
+  "proc_ms": 5,
+  "repeat_words": 10
 }

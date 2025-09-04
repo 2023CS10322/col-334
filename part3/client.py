@@ -2,77 +2,83 @@
 import socket
 import time
 import argparse
-import os
 
 # --- Simple config parser (no json lib) ---
 def load_config(filename="config.json"):
-    config = {}
+    cfg = {}
     with open(filename) as f:
         for line in f:
             line = line.strip().strip(",")
             if not line or line[0] in "{}":
                 continue
-            key, val = line.split(":", 1)
-            key = key.strip().strip('"')
-            val = val.strip().strip('"')
-            config[key] = val
-    return config
+            k, v = line.split(":", 1)
+            cfg[k.strip().strip('"')] = v.strip().strip('"')
+    return cfg
 
-config = load_config()
-SERVER_IP = config.get("server_ip", "10.0.0.100")
-SERVER_PORT = int(config.get("port", 8887))
-P = int(config.get("p", 0))
-K = int(config.get("k", 5))
+cfg = load_config()
+SERVER_IP = cfg.get("server_ip", "10.0.0.100")
+SERVER_PORT = int(cfg.get("port", 8887))
+P = int(cfg.get("p", 0))
+K = int(cfg.get("k", 5))
 
 def download_file(batch_size: int):
+    """
+    Send 'batch_size' requests back-to-back, then block until we've received
+    exactly 'batch_size' responses (unless EOF is seen earlier). Repeat until EOF.
+    """
     offset = P
     all_words = []
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((SERVER_IP, SERVER_PORT))
+        buf = ""
 
         while True:
-            # Send batch_size requests
+            # --- send a burst of `batch_size` requests ---
             for _ in range(batch_size):
                 req = f"{offset},{K}\n"
                 s.sendall(req.encode())
                 offset += K
 
-            # Read responses (keep reading until we hit EOF or file ends)
-            data = s.recv(4096).decode().strip()
-            if not data:
-                break
+            # --- receive exactly `batch_size` responses (or stop early on EOF) ---
+            got = 0
+            while got < batch_size:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return all_words  # connection closed
 
-            parts = data.split("\n")
-            for resp in parts:
-                if not resp:
-                    continue
-                if "EOF" in resp:
-                    words_part = resp.replace("EOF", "").rstrip(",")
-                    if words_part:
-                        all_words.extend([w.strip() for w in words_part.split(",") if w.strip()])
-                    return all_words  # Done, return immediately
-                else:
-                    all_words.extend([w.strip() for w in resp.split(",") if w.strip()])
+                buf += chunk.decode()
+                while "\n" in buf and got < batch_size:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    got += 1
 
-
-
+                    if "EOF" in line:
+                        # collect remaining words on the EOF line
+                        words_part = line.replace("EOF", "").rstrip(",")
+                        if words_part:
+                            all_words.extend([w for w in words_part.split(",") if w])
+                        return all_words
+                    else:
+                        all_words.extend([w for w in line.split(",") if w])
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-size", type=int, default=1,
-                        help="Number of back-to-back requests per round (rogue uses c > 1)")
-    parser.add_argument("--client-id", type=str, default="client",
-                        help="Client identifier for logging (unused but passed by runner)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="Back-to-back requests per burst (greedy uses c>1)")
+    ap.add_argument("--client-id", type=str, default="client")
+    args = ap.parse_args()
 
-    start = time.time()
+    t0 = time.time()
     _ = download_file(args.batch_size)
-    end = time.time()
+    t1 = time.time()
 
-    elapsed_ms = int((end - start) * 1000)
-    # Print ONLY elapsed time in required format
+    # Print both elapsed and absolute finish time (for common-start timing)
+    elapsed_ms = int((t1 - t0) * 1000)
     print(f"ELAPSED_MS:{elapsed_ms}")
+    print(f"FINISH_EPOCH:{t1:.6f}")
 
 if __name__ == "__main__":
     main()
