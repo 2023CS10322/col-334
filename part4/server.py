@@ -1,7 +1,7 @@
 import socket
 import threading
 import json
-from collections import deque
+from collections import deque, defaultdict
 
 # Load configuration
 with open('config.json', 'r') as f:
@@ -14,21 +14,25 @@ PORT = config['port']
 with open('words.txt', 'r') as f:
     words = f.read().strip().split(',')
 
-# Thread-safe queue for requests
-request_queue = deque()
+# Thread-safe client queues for round-robin scheduling
+client_queues = defaultdict(deque)
+active_clients = set()
 queue_lock = threading.Lock()
 condition = threading.Condition(queue_lock)
 
 def handle_client(conn, addr):
     print(f"Connected by {addr}")
+    client_id = addr[0]  # Use client IP as identifier
+    
     try:
         data = conn.recv(1024).decode().strip()
         if not data:
             return
         
-        # Add request to queue
+        # Add request to the client's queue
         with condition:
-            request_queue.append((conn, data))
+            client_queues[client_id].append((conn, data))
+            active_clients.add(client_id)
             condition.notify()
             
     except Exception as e:
@@ -38,11 +42,49 @@ def handle_client(conn, addr):
         pass
 
 def process_requests():
+    # For round-robin, we'll keep track of which clients we've processed
+    current_client_idx = 0
+    client_list = []
+    
     while True:
         with condition:
-            while not request_queue:
+            # Wait until there's at least one request to process
+            while not active_clients:
                 condition.wait()
-            conn, data = request_queue.popleft()
+            
+            # Update the client list if it changed
+            if set(client_list) != active_clients:
+                client_list = list(active_clients)
+                
+            # No clients left to process
+            if not client_list:
+                continue
+                
+            # Round-robin: Move to next client with requests
+            attempts = 0
+            while attempts < len(client_list):
+                current_client_idx = (current_client_idx) % len(client_list)
+                client_id = client_list[current_client_idx]
+                
+                if client_queues[client_id]:
+                    # Process one request from this client
+                    conn, data = client_queues[client_id].popleft()
+                    
+                    # If this client has no more requests, remove from active list
+                    if not client_queues[client_id]:
+                        active_clients.remove(client_id)
+                        
+                    # Move to the next client for next time
+                    current_client_idx = (current_client_idx + 1) % len(client_list)
+                    break
+                else:
+                    # This client has no requests, try next client
+                    current_client_idx = (current_client_idx + 1) % len(client_list)
+                    attempts += 1
+            
+            # If we've checked all clients and found no requests, wait
+            if attempts == len(client_list):
+                continue
         
         try:
             # Parse request
